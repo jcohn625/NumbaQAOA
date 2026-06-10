@@ -151,6 +151,67 @@ class QAOASimulator:
         state = self.build_state(params)
         return float(energy_from_state(state, self.phase_cost))
 
+    def sample_bitstrings(self, params=None, n_samples=1000, *, seed=None, replace=True):
+        params = self._params(params)
+        n_samples = int(n_samples)
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive")
+
+        state = self.build_state(params)
+        probabilities = np.abs(state) ** 2
+        probabilities = probabilities / probabilities.sum()
+
+        rng = np.random.default_rng(seed)
+        states = rng.choice(self.dim, size=n_samples, replace=replace, p=probabilities)
+        bitstrings = ((states[:, None] >> np.arange(self.n)) & 1).astype(np.int8)
+        energies = self.objective_cost[states].astype(np.float64, copy=True)
+        sampled_probabilities = probabilities[states].astype(np.float64, copy=True)
+
+        return {
+            "states": states,
+            "bitstrings": bitstrings,
+            "energies": energies,
+            "probabilities": sampled_probabilities,
+        }
+
+    def plot_sampled_energy_distribution(
+        self,
+        params=None,
+        n_samples=1000,
+        *,
+        seed=None,
+        bins=50,
+        ax=None,
+        density=False,
+        show_exact=True,
+        hist_kwargs=None,
+    ):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError(
+                "plot_sampled_energy_distribution requires matplotlib. Install it with "
+                '`python -m pip install "numba-qaoa[plot]"` or `python -m pip install matplotlib`.'
+            ) from exc
+
+        samples = self.sample_bitstrings(params, n_samples=n_samples, seed=seed)
+        if ax is None:
+            _, ax = plt.subplots()
+        fig = ax.figure
+
+        kwargs = {"alpha": 0.8, "edgecolor": "black"}
+        if hist_kwargs is not None:
+            kwargs.update(hist_kwargs)
+        ax.hist(samples["energies"], bins=bins, density=density, **kwargs)
+        ax.axvline(samples["energies"].mean(), color="tab:orange", linestyle="--", label="Sample mean")
+        if show_exact:
+            ax.axvline(self.objective_cost.min(), color="tab:red", linestyle=":", label="Exact min")
+        ax.set_xlabel("Energy")
+        ax.set_ylabel("Density" if density else "Count")
+        ax.set_title(f"Sampled energy distribution (M={n_samples})")
+        ax.legend()
+        return fig, ax, samples
+
     def gradient(self, params=None, cache_mode=None):
         params = self._params(params)
         mode = self._resolve_cache_mode(cache_mode or self.cache_mode)

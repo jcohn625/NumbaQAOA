@@ -21,6 +21,9 @@ dev = [
 gw = [
   "cvxpy>=1.4",
 ]
+plot = [
+  "matplotlib>=3.6",
+]
 
 [tool.setuptools.packages.find]
 include = ["numba_qaoa*"]

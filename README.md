@@ -29,6 +29,29 @@ grad = sim.gradient(params)
 result = sim.optimize(params, method="l-bfgs-b")
 ```
 
+## Sampling
+
+Sample bitstrings from the final state and evaluate their full-objective
+energies:
+
+```python
+samples = sim.sample_bitstrings(params, n_samples=1000, seed=1)
+
+print(samples["bitstrings"])
+print(samples["energies"])
+```
+
+In a notebook, plot the sampled energy distribution:
+
+```python
+fig, ax, samples = sim.plot_sampled_energy_distribution(
+    params,
+    n_samples=1000,
+    bins=40,
+    seed=1,
+)
+```
+
 ## Banded Phase Surrogates
 
 To use a sparse/banded Hamiltonian for the QAOA phase layers while still
