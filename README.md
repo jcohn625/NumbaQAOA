@@ -29,6 +29,30 @@ grad = sim.gradient(params)
 result = sim.optimize(params, method="l-bfgs-b")
 ```
 
+## Banded Phase Surrogates
+
+To use a sparse/banded Hamiltonian for the QAOA phase layers while still
+evaluating the full dense objective:
+
+```python
+sim = QAOASimulator(
+    w,
+    h,
+    p=6,
+    max_bandwidth=2,
+    permutation="spectral",
+)
+
+print(sim.energy(params))       # full objective
+print(sim.phase_energy(params)) # banded phase Hamiltonian objective
+print(sim.phase_permutation)    # logical order used to define the band
+```
+
+`max_bandwidth=k` keeps couplings whose permuted indices are at most `k` apart.
+The default permutation heuristic uses a weighted spectral ordering followed by
+adjacent-swap local search to keep as much upper-triangle coupling weight as
+possible inside the band.
+
 ## Cache Modes
 
 - `cache_mode="full"` saves every intermediate gate state. Fastest, most memory.

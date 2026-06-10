@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.optimize import minimize
 
+from .banding import make_banded_surrogate
 from .kernels_cpu import (
     apply_cost_phase_inplace,
     apply_x_mixer_inplace,
@@ -28,6 +29,11 @@ class QAOASimulator:
         cache_mode="auto",
         cost_mode="cached",
         max_cache_bytes=None,
+        phase_w=None,
+        phase_h=None,
+        max_bandwidth=None,
+        permutation="spectral",
+        band_local_search_passes=4,
     ):
         self.w = np.asarray(w, dtype=np.float64)
         self.h = np.asarray(h, dtype=np.float64)
@@ -37,6 +43,8 @@ class QAOASimulator:
         self.cache_mode = cache_mode
         self.cost_mode = cost_mode
         self.max_cache_bytes = max_cache_bytes
+        self.max_bandwidth = max_bandwidth
+        self.phase_permutation = None
 
         if self.w.ndim != 2 or self.w.shape[0] != self.w.shape[1]:
             raise ValueError("w must be a square n x n matrix")
@@ -50,6 +58,8 @@ class QAOASimulator:
             raise NotImplementedError('only cost_mode="cached" is implemented in this first version')
         if cache_mode not in ("auto", "full", "layer", "adjoint"):
             raise ValueError('cache_mode must be "auto", "full", "layer", or "adjoint"')
+        if phase_w is not None and max_bandwidth is not None:
+            raise ValueError("use either phase_w or max_bandwidth, not both")
 
         self.n = self.h.shape[0]
         if self.n >= 63:
@@ -58,9 +68,41 @@ class QAOASimulator:
         self.num_params = 2 * self.p
         self.params = np.zeros(self.num_params, dtype=np.float64)
 
-        self.edge_i, self.edge_j, self.edge_w = self._build_upper_edges()
+        self.phase_w, self.phase_h = self._build_phase_hamiltonian(
+            phase_w,
+            phase_h,
+            max_bandwidth,
+            permutation,
+            band_local_search_passes,
+        )
+
+        self.edge_i, self.edge_j, self.edge_w = self._build_upper_edges(self.w)
         self.cost = np.empty(self.dim, dtype=self.real_dtype)
         build_cost_upper_edges(self.cost, self.edge_i, self.edge_j, self.edge_w, self.h)
+        self.objective_cost = self.cost
+
+        phase_matches_objective = np.array_equal(self.phase_w, self.w) and np.array_equal(
+            self.phase_h, self.h
+        )
+        if phase_matches_objective:
+            self.phase_edge_i = self.edge_i
+            self.phase_edge_j = self.edge_j
+            self.phase_edge_w = self.edge_w
+            self.phase_cost = self.objective_cost
+        else:
+            (
+                self.phase_edge_i,
+                self.phase_edge_j,
+                self.phase_edge_w,
+            ) = self._build_upper_edges(self.phase_w)
+            self.phase_cost = np.empty(self.dim, dtype=self.real_dtype)
+            build_cost_upper_edges(
+                self.phase_cost,
+                self.phase_edge_i,
+                self.phase_edge_j,
+                self.phase_edge_w,
+                self.phase_h,
+            )
 
         self.state = np.empty(self.dim, dtype=self.dtype)
         self._work = np.empty(self.dim, dtype=self.dtype)
@@ -69,7 +111,8 @@ class QAOASimulator:
         mode = self._resolve_cache_mode(cache_mode or self.cache_mode)
         cbytes = self.dtype.itemsize * self.dim
         rbytes = self.real_dtype.itemsize * self.dim
-        base = rbytes + 3 * cbytes
+        cost_vectors = 1 if self.phase_cost is self.objective_cost else 2
+        base = cost_vectors * rbytes + 3 * cbytes
         if mode == "full":
             cache = (2 * self.p + 1) * cbytes
         elif mode == "layer":
@@ -96,13 +139,17 @@ class QAOASimulator:
         for layer in range(self.p):
             gamma = params[2 * layer]
             beta = params[2 * layer + 1]
-            apply_cost_phase_inplace(state, self.cost, gamma)
+            apply_cost_phase_inplace(state, self.phase_cost, gamma)
             apply_x_mixer_inplace(state, beta, self.n)
         return state
 
     def energy(self, params=None):
         state = self.build_state(params)
-        return float(energy_from_state(state, self.cost))
+        return float(energy_from_state(state, self.objective_cost))
+
+    def phase_energy(self, params=None):
+        state = self.build_state(params)
+        return float(energy_from_state(state, self.phase_cost))
 
     def gradient(self, params=None, cache_mode=None):
         params = self._params(params)
@@ -247,13 +294,13 @@ class QAOASimulator:
         for layer in range(self.p):
             idx += 1
             copy_state(states[idx], states[idx - 1])
-            apply_cost_phase_inplace(states[idx], self.cost, params[2 * layer])
+            apply_cost_phase_inplace(states[idx], self.phase_cost, params[2 * layer])
             idx += 1
             copy_state(states[idx], states[idx - 1])
             apply_x_mixer_inplace(states[idx], params[2 * layer + 1], self.n)
 
         left = np.empty(self.dim, dtype=self.dtype)
-        energy = float(energy_and_apply_cost_operator(left, states[-1], self.cost))
+        energy = float(energy_and_apply_cost_operator(left, states[-1], self.objective_cost))
         grad = np.empty(self.num_params, dtype=np.float64)
 
         idx = 2 * self.p
@@ -261,8 +308,8 @@ class QAOASimulator:
             grad[2 * layer + 1] = beta_gradient_inner(left, states[idx], self.n)
             apply_x_mixer_inplace(left, -params[2 * layer + 1], self.n)
             idx -= 1
-            grad[2 * layer] = gamma_gradient_inner(left, states[idx], self.cost)
-            apply_cost_phase_inplace(left, self.cost, -params[2 * layer])
+            grad[2 * layer] = gamma_gradient_inner(left, states[idx], self.phase_cost)
+            apply_cost_phase_inplace(left, self.phase_cost, -params[2 * layer])
             idx -= 1
         return energy, grad
 
@@ -271,12 +318,12 @@ class QAOASimulator:
         fill_plus_state(states[0])
         for layer in range(self.p):
             copy_state(states[layer + 1], states[layer])
-            apply_cost_phase_inplace(states[layer + 1], self.cost, params[2 * layer])
+            apply_cost_phase_inplace(states[layer + 1], self.phase_cost, params[2 * layer])
             apply_x_mixer_inplace(states[layer + 1], params[2 * layer + 1], self.n)
 
         left = np.empty(self.dim, dtype=self.dtype)
         right_mid = np.empty(self.dim, dtype=self.dtype)
-        energy = float(energy_and_apply_cost_operator(left, states[-1], self.cost))
+        energy = float(energy_and_apply_cost_operator(left, states[-1], self.objective_cost))
         grad = np.empty(self.num_params, dtype=np.float64)
 
         for layer in range(self.p - 1, -1, -1):
@@ -284,15 +331,15 @@ class QAOASimulator:
             apply_x_mixer_inplace(left, -params[2 * layer + 1], self.n)
 
             copy_state(right_mid, states[layer])
-            apply_cost_phase_inplace(right_mid, self.cost, params[2 * layer])
-            grad[2 * layer] = gamma_gradient_inner(left, right_mid, self.cost)
-            apply_cost_phase_inplace(left, self.cost, -params[2 * layer])
+            apply_cost_phase_inplace(right_mid, self.phase_cost, params[2 * layer])
+            grad[2 * layer] = gamma_gradient_inner(left, right_mid, self.phase_cost)
+            apply_cost_phase_inplace(left, self.phase_cost, -params[2 * layer])
         return energy, grad
 
     def _gradient_adjoint(self, params):
         right = self.build_state(params, out=np.empty(self.dim, dtype=self.dtype))
         left = np.empty(self.dim, dtype=self.dtype)
-        energy = float(energy_and_apply_cost_operator(left, right, self.cost))
+        energy = float(energy_and_apply_cost_operator(left, right, self.objective_cost))
         grad = np.empty(self.num_params, dtype=np.float64)
 
         for layer in range(self.p - 1, -1, -1):
@@ -300,9 +347,9 @@ class QAOASimulator:
             apply_x_mixer_inplace(right, -params[2 * layer + 1], self.n)
             apply_x_mixer_inplace(left, -params[2 * layer + 1], self.n)
 
-            grad[2 * layer] = gamma_gradient_inner(left, right, self.cost)
-            apply_cost_phase_inplace(right, self.cost, -params[2 * layer])
-            apply_cost_phase_inplace(left, self.cost, -params[2 * layer])
+            grad[2 * layer] = gamma_gradient_inner(left, right, self.phase_cost)
+            apply_cost_phase_inplace(right, self.phase_cost, -params[2 * layer])
+            apply_cost_phase_inplace(left, self.phase_cost, -params[2 * layer])
         return energy, grad
 
     def _resolve_cache_mode(self, mode):
@@ -367,13 +414,54 @@ class QAOASimulator:
         obj.edge_j = self.edge_j
         obj.edge_w = self.edge_w
         obj.cost = self.cost
+        obj.objective_cost = self.objective_cost
+        obj.phase_w = self.phase_w
+        obj.phase_h = self.phase_h
+        obj.phase_permutation = self.phase_permutation
+        obj.max_bandwidth = self.max_bandwidth
+        obj.phase_edge_i = self.phase_edge_i
+        obj.phase_edge_j = self.phase_edge_j
+        obj.phase_edge_w = self.phase_edge_w
+        obj.phase_cost = self.phase_cost
         obj.state = np.empty(obj.dim, dtype=obj.dtype)
         obj._work = np.empty(obj.dim, dtype=obj.dtype)
         return obj
 
-    def _build_upper_edges(self):
+    def _build_phase_hamiltonian(
+        self,
+        phase_w,
+        phase_h,
+        max_bandwidth,
+        permutation,
+        band_local_search_passes,
+    ):
+        if phase_h is None:
+            phase_h = self.h
+        else:
+            phase_h = np.asarray(phase_h, dtype=np.float64)
+            if phase_h.shape != self.h.shape:
+                raise ValueError("phase_h must have shape (n,)")
+
+        if max_bandwidth is not None:
+            phase_w, order = make_banded_surrogate(
+                self.w,
+                int(max_bandwidth),
+                permutation=permutation,
+                local_search_passes=band_local_search_passes,
+            )
+            self.phase_permutation = order
+        elif phase_w is None:
+            phase_w = self.w
+        else:
+            phase_w = np.asarray(phase_w, dtype=np.float64)
+            if phase_w.shape != self.w.shape:
+                raise ValueError("phase_w must have shape (n, n)")
+
+        return np.asarray(phase_w, dtype=np.float64), phase_h
+
+    def _build_upper_edges(self, w):
         rows, cols = np.triu_indices(self.n, k=1)
-        weights = self.w[rows, cols]
+        weights = w[rows, cols]
         keep = weights != 0.0
         return (
             np.ascontiguousarray(rows[keep], dtype=np.int64),
