@@ -2,12 +2,12 @@ import numpy as np
 from scipy.optimize import minimize
 
 from .kernels_cpu import (
-    apply_cost_operator,
     apply_cost_phase_inplace,
     apply_x_mixer_inplace,
     beta_gradient_inner,
-    build_cost_upper,
+    build_cost_upper_edges,
     copy_state,
+    energy_and_apply_cost_operator,
     energy_from_state,
     fill_plus_state,
     gamma_gradient_inner,
@@ -57,8 +57,9 @@ class QAOASimulator:
         self.num_params = 2 * self.p
         self.params = np.zeros(self.num_params, dtype=np.float64)
 
+        self.edge_i, self.edge_j, self.edge_w = self._build_upper_edges()
         self.cost = np.empty(self.dim, dtype=self.real_dtype)
-        build_cost_upper(self.cost, self.w, self.h)
+        build_cost_upper_edges(self.cost, self.edge_i, self.edge_j, self.edge_w, self.h)
 
         self.state = np.empty(self.dim, dtype=self.dtype)
         self._work = np.empty(self.dim, dtype=self.dtype)
@@ -178,9 +179,8 @@ class QAOASimulator:
             copy_state(states[idx], states[idx - 1])
             apply_x_mixer_inplace(states[idx], params[2 * layer + 1], self.n)
 
-        energy = float(energy_from_state(states[-1], self.cost))
         left = np.empty(self.dim, dtype=self.dtype)
-        apply_cost_operator(left, states[-1], self.cost)
+        energy = float(energy_and_apply_cost_operator(left, states[-1], self.cost))
         grad = np.empty(self.num_params, dtype=np.float64)
 
         idx = 2 * self.p
@@ -201,10 +201,9 @@ class QAOASimulator:
             apply_cost_phase_inplace(states[layer + 1], self.cost, params[2 * layer])
             apply_x_mixer_inplace(states[layer + 1], params[2 * layer + 1], self.n)
 
-        energy = float(energy_from_state(states[-1], self.cost))
         left = np.empty(self.dim, dtype=self.dtype)
         right_mid = np.empty(self.dim, dtype=self.dtype)
-        apply_cost_operator(left, states[-1], self.cost)
+        energy = float(energy_and_apply_cost_operator(left, states[-1], self.cost))
         grad = np.empty(self.num_params, dtype=np.float64)
 
         for layer in range(self.p - 1, -1, -1):
@@ -219,9 +218,8 @@ class QAOASimulator:
 
     def _gradient_adjoint(self, params):
         right = self.build_state(params, out=np.empty(self.dim, dtype=self.dtype))
-        energy = float(energy_from_state(right, self.cost))
         left = np.empty(self.dim, dtype=self.dtype)
-        apply_cost_operator(left, right, self.cost)
+        energy = float(energy_and_apply_cost_operator(left, right, self.cost))
         grad = np.empty(self.num_params, dtype=np.float64)
 
         for layer in range(self.p - 1, -1, -1):
@@ -257,3 +255,13 @@ class QAOASimulator:
         if params.shape != (self.num_params,):
             raise ValueError(f"params must have shape ({self.num_params},)")
         return params
+
+    def _build_upper_edges(self):
+        rows, cols = np.triu_indices(self.n, k=1)
+        weights = self.w[rows, cols]
+        keep = weights != 0.0
+        return (
+            np.ascontiguousarray(rows[keep], dtype=np.int64),
+            np.ascontiguousarray(cols[keep], dtype=np.int64),
+            np.ascontiguousarray(weights[keep], dtype=self.real_dtype),
+        )
