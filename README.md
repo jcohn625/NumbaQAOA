@@ -67,6 +67,41 @@ Use either:
 - `method="adam"` for the local lightweight Adam optimizer
 - `method="l-bfgs-b"` for `scipy.optimize.minimize(..., method="L-BFGS-B")`
 
+For layer-by-layer greedy initialization:
+
+```python
+result = sim.optimize_greedy(
+    method="l-bfgs-b",
+    expansion="append_random",
+    seed=1,
+    init_scale=0.1,
+    scipy_options={"maxiter": 300},
+)
+
+print(result["fun"])
+print(result["x"])
+```
+
+This optimizes depth 1, appends a small random new layer, optimizes depth 2, and
+repeats until it reaches `sim.p`. Use `expansion="append_zero"` if you want the
+new depth to start as an exact identity extension of the previous circuit.
+
+## Reference Solvers
+
+For a Goemans-Williamson-style SDP reference:
+
+```python
+ref = sim.reference_solution(method="goemans-williamson", n_rounds=512, seed=1)
+
+print(ref.energy)
+print(ref.bitstring)
+print(ref.sdp_bound)
+```
+
+This uses the standard MaxCut SDP idea. For fields or signed couplings, it uses
+the analogous Ising SDP relaxation with an anchor spin, so it is a useful
+reference but not the classic MaxCut approximation guarantee.
+
 ## Local Scratch Work
 
 Messy notebooks and exploratory scripts should live under `scratch/` or `notebooks/`.

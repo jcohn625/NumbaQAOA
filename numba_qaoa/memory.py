@@ -19,7 +19,7 @@ def complex_itemsize(dtype):
 def real_dtype_for_complex(dtype):
     dtype = np.dtype(dtype)
     if dtype == np.dtype(np.complex64):
-        return np.float32
+        return np.dtype(np.float32)
     if dtype == np.dtype(np.complex128):
-        return np.float64
+        return np.dtype(np.float64)
     raise ValueError("dtype must be np.complex64 or np.complex128")

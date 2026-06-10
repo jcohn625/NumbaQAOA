@@ -14,6 +14,7 @@ from .kernels_cpu import (
 )
 from .memory import available_memory_bytes, real_dtype_for_complex
 from .optimizers import Adam
+from .references import goemans_williamson_reference
 
 
 class QAOASimulator:
@@ -167,6 +168,78 @@ class QAOASimulator:
             return result
         raise ValueError('method must be "adam" or "l-bfgs-b"')
 
+    def optimize_greedy(
+        self,
+        params0=None,
+        *,
+        method="l-bfgs-b",
+        expansion="append_random",
+        seed=None,
+        init_scale=0.1,
+        steps=1000,
+        lr=1e-2,
+        cache_mode=None,
+        scipy_options=None,
+        callback=None,
+    ):
+        """Optimize layer-by-layer from p=1 up to this simulator's p.
+
+        Each stage optimizes a depth-k simulator. The depth-(k+1) initial point
+        is built from the optimized depth-k parameters.
+        """
+        if self.p == 0:
+            energy, grad = self.energy_and_gradient(self.params, cache_mode=cache_mode)
+            return {
+                "method": f"greedy-{method}",
+                "x": self.params.copy(),
+                "fun": energy,
+                "jac": grad,
+                "stages": [],
+            }
+
+        rng = np.random.default_rng(seed)
+        params = self._first_greedy_params(params0, rng, init_scale)
+        stages = []
+        for depth in range(1, self.p + 1):
+            if depth > 1:
+                params = self._expand_greedy_params(params, expansion, rng, init_scale)
+            depth_sim = self._clone_with_depth(depth)
+            result = depth_sim.optimize(
+                params,
+                method=method,
+                steps=steps,
+                lr=lr,
+                cache_mode=cache_mode,
+                scipy_options=scipy_options,
+            )
+            params = np.asarray(result["x"] if isinstance(result, dict) else result.x).copy()
+            energy = float(result["fun"] if isinstance(result, dict) else result.fun)
+            stage = {
+                "depth": depth,
+                "x": params.copy(),
+                "fun": energy,
+                "result": result,
+            }
+            stages.append(stage)
+            if callback is not None:
+                callback(depth, stage)
+
+        final_energy, final_grad = self.energy_and_gradient(params, cache_mode=cache_mode)
+        self.params = params.copy()
+        return {
+            "method": f"greedy-{method}",
+            "x": params,
+            "fun": final_energy,
+            "jac": final_grad,
+            "stages": stages,
+        }
+
+    def reference_solution(self, method="goemans-williamson", **kwargs):
+        method_key = method.lower()
+        if method_key in ("goemans-williamson", "gw", "gnomes-williamson"):
+            return goemans_williamson_reference(self.w, self.h, **kwargs)
+        raise ValueError('method must be "goemans-williamson"')
+
     def _gradient_full(self, params):
         states = np.empty((2 * self.p + 1, self.dim), dtype=self.dtype)
         fill_plus_state(states[0])
@@ -255,6 +328,48 @@ class QAOASimulator:
         if params.shape != (self.num_params,):
             raise ValueError(f"params must have shape ({self.num_params},)")
         return params
+
+    def _first_greedy_params(self, params0, rng, init_scale):
+        if params0 is None:
+            return rng.uniform(-init_scale, init_scale, size=2)
+        params0 = np.asarray(params0, dtype=np.float64)
+        if params0.shape == (2,):
+            return params0.copy()
+        if params0.shape == (self.num_params,):
+            return params0[:2].copy()
+        raise ValueError(f"params0 must have shape (2,) or ({self.num_params},)")
+
+    def _expand_greedy_params(self, params, expansion, rng, init_scale):
+        if expansion == "append_zero":
+            return np.concatenate([params, np.zeros(2, dtype=np.float64)])
+        if expansion == "append_random":
+            new_layer = rng.uniform(-init_scale, init_scale, size=2)
+            return np.concatenate([params, new_layer])
+        if expansion == "repeat_last":
+            return np.concatenate([params, params[-2:].copy()])
+        raise ValueError('expansion must be "append_random", "append_zero", or "repeat_last"')
+
+    def _clone_with_depth(self, p):
+        obj = object.__new__(QAOASimulator)
+        obj.w = self.w
+        obj.h = self.h
+        obj.p = int(p)
+        obj.dtype = self.dtype
+        obj.real_dtype = self.real_dtype
+        obj.cache_mode = self.cache_mode
+        obj.cost_mode = self.cost_mode
+        obj.max_cache_bytes = self.max_cache_bytes
+        obj.n = self.n
+        obj.dim = self.dim
+        obj.num_params = 2 * obj.p
+        obj.params = np.zeros(obj.num_params, dtype=np.float64)
+        obj.edge_i = self.edge_i
+        obj.edge_j = self.edge_j
+        obj.edge_w = self.edge_w
+        obj.cost = self.cost
+        obj.state = np.empty(obj.dim, dtype=obj.dtype)
+        obj._work = np.empty(obj.dim, dtype=obj.dtype)
+        return obj
 
     def _build_upper_edges(self):
         rows, cols = np.triu_indices(self.n, k=1)
