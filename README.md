@@ -7,11 +7,7 @@ state by alternating phase evolution under a problem Hamiltonian with mixing
 evolution under a driver Hamiltonian. This package simulates the full
 statevector for Ising objectives of the form
 
-$$
-H_C =
-\sum_{i=0}^{n-1}\sum_{j=i+1}^{n-1} w_{ij} Z_i Z_j
-+ \sum_{i=0}^{n-1} h_i Z_i
-$$
+$$H_C = \sum_i \sum_{j > i} w_{ij} Z_i Z_j + \sum_i h_i Z_i$$
 
 using the standard transverse-field mixer
 
