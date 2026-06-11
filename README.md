@@ -7,25 +7,29 @@ state by alternating phase evolution under a problem Hamiltonian with mixing
 evolution under a driver Hamiltonian. This package simulates the full
 statevector for Ising objectives of the form
 
-```math
-H_C = \sum_{i<j} w_{ij} Z_i Z_j + \sum_i h_i Z_i,
-```
+$$
+H_C =
+\sum_{i=0}^{n-1}\sum_{j=i+1}^{n-1} w_{ij} Z_i Z_j
++ \sum_{i=0}^{n-1} h_i Z_i
+$$
 
 using the standard transverse-field mixer
 
-```math
-H_B = \sum_i X_i.
-```
+$$
+H_B = \sum_{i=0}^{n-1} X_i
+$$
 
 For depth $p$, the prepared state is
 
-```math
-\left|\psi(\gamma,\beta)\right\rangle =
+$$
+\psi(\gamma,\beta) =
 \left(\prod_{\ell=1}^{p}
 e^{-i \beta_\ell H_B}
 e^{-i \gamma_\ell H_C}\right)
-\left|+\right\rangle^{\otimes n}.
-```
+\psi_0
+$$
+
+where $\psi_0$ is the uniform superposition state.
 
 The input `w` may be a full `n x n` matrix, but only the upper triangle is used.
 
